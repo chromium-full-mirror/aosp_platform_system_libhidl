@@ -3,9 +3,8 @@
 hidl_interface {
     name: "android.hidl.allocator@1.0",
     root: "android.hidl",
-    vndk: {
-        enabled: true,
-    },
+    // TODO(b/153609531): remove when no longer needed.
+    native_bridge_supported: true,
     srcs: [
         "IAllocator.hal",
     ],
@@ -13,4 +12,8 @@ hidl_interface {
         "android.hidl.base@1.0",
     ],
     gen_java: false,
+    apex_available: [
+        "//apex_available:anyapex",
+        "//apex_available:platform",
+    ],
 }

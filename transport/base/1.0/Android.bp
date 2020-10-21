@@ -3,12 +3,15 @@
 hidl_interface {
     name: "android.hidl.base@1.0",
     root: "android.hidl",
-    vndk: {
-        enabled: true,
-    },
+    // TODO(b/153609531): remove when no longer needed.
+    native_bridge_supported: true,
     srcs: [
         "types.hal",
         "IBase.hal",
     ],
     gen_java: true,
+    apex_available: [
+        "//apex_available:anyapex",
+        "//apex_available:platform",
+    ],
 }
