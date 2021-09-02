@@ -17,7 +17,7 @@
 #define LOG_TAG "LibHidlTest"
 
 #pragma clang diagnostic push
-#pragma clang diagnostic fatal "-Wpadded"
+#pragma clang diagnostic error "-Wpadded"
 #include <hidl/HidlInternal.h>
 #include <hidl/HidlSupport.h>
 #pragma clang diagnostic pop
@@ -173,6 +173,20 @@ TEST_F(LibHidlTest, StringTest) {
     EXPECT_TRUE(hs1 >= hs1);
     EXPECT_TRUE(hs2 >= hs1);
     EXPECT_FALSE(hs2 <= hs1);
+}
+
+// empty string optimization should apply for any constructor
+TEST_F(LibHidlTest, HidlStringEmptyLiteralAllocation) {
+    using android::hardware::hidl_string;
+
+    hidl_string empty1;
+    hidl_string empty2("");
+    hidl_string empty3("foo", 0);
+    hidl_string empty4((std::string()));
+
+    EXPECT_EQ(empty1.c_str(), empty2.c_str());
+    EXPECT_EQ(empty1.c_str(), empty3.c_str());
+    EXPECT_EQ(empty1.c_str(), empty4.c_str());
 }
 
 TEST_F(LibHidlTest, MemoryTest) {

@@ -159,12 +159,6 @@ static constexpr bool kEnforceVintfManifest = true;
 static constexpr bool kEnforceVintfManifest = false;
 #endif
 
-#ifdef LIBHIDL_TARGET_DEBUGGABLE
-static constexpr bool kDebuggable = true;
-#else
-static constexpr bool kDebuggable = false;
-#endif
-
 static bool* getTrebleTestingOverridePtr() {
     static bool gTrebleTestingOverride = false;
     return &gTrebleTestingOverride;
@@ -174,8 +168,13 @@ void setTrebleTestingOverride(bool testingOverride) {
     *getTrebleTestingOverridePtr() = testingOverride;
 }
 
+static bool isDebuggable() {
+    static bool debuggable = base::GetBoolProperty("ro.debuggable", false);
+    return debuggable;
+}
+
 static inline bool isTrebleTestingOverride() {
-    if (kEnforceVintfManifest && !kDebuggable) {
+    if (kEnforceVintfManifest && !isDebuggable()) {
         // don't allow testing override in production
         return false;
     }
@@ -183,70 +182,8 @@ static inline bool isTrebleTestingOverride() {
     return *getTrebleTestingOverridePtr();
 }
 
-/*
- * Returns the age of the current process by reading /proc/self/stat and comparing starttime to the
- * current time. This is useful for measuring how long it took a HAL to register itself.
- */
-__attribute__((noinline)) static long getProcessAgeMs() {
-    constexpr const int PROCFS_STAT_STARTTIME_INDEX = 21;
-    std::string content;
-    if (!android::base::ReadFileToString("/proc/self/stat", &content, false)) {
-        LOG(ERROR) << "Process age: Could not read /proc/self/stat";
-        return -1;
-    }
-
-    std::vector<std::string> stats = android::base::Split(content, " ");
-    if (PROCFS_STAT_STARTTIME_INDEX >= stats.size()) {
-        LOG(ERROR) << "Process age: Could not read starttime from /proc/self/stat";
-        return -1;
-    }
-
-    const std::string& startTimeString = stats.at(PROCFS_STAT_STARTTIME_INDEX);
-    unsigned long long startTimeInClockTicks = 0;
-    if (!android::base::ParseUint(startTimeString, &startTimeInClockTicks)) {
-        LOG(ERROR) << "Process age: Could not parse start time: " << startTimeString;
-        return -1;
-    }
-
-    const int64_t ticksPerSecond = sysconf(_SC_CLK_TCK);
-    if (ticksPerSecond <= 0) {
-        LOG(ERROR) << "Process age: Invalid _SC_CLK_TCK: " << ticksPerSecond;
-        return -1;
-    }
-
-    const int64_t uptime = android::uptimeMillis();
-    if (uptime < 0) {
-        LOG(ERROR) << "Process age: Invalid uptime: " << uptime;
-        return -1;
-    }
-
-    unsigned long long startTimeTicks;
-    if (__builtin_umulll_overflow(1000ULL, startTimeInClockTicks, &startTimeTicks)) {
-        LOG(ERROR) << "Process age: Too many ticks, overflow: " << startTimeInClockTicks;
-        return -1;
-    }
-
-    long startTimeMs = startTimeTicks / ticksPerSecond;
-    if (startTimeMs >= uptime) {
-        LOG(ERROR) << "Process age: process started in future: " << startTimeMs << " after "
-                   << uptime;
-        return -1;
-    }
-
-    return uptime - startTimeMs;
-}
-
 static void onRegistrationImpl(const std::string& descriptor, const std::string& instanceName) {
-    long halStartDelay = getProcessAgeMs();
-    if (halStartDelay >= 0) {
-        // The "start delay" printed here is an estimate of how long it took the HAL to go from
-        // process creation to registering itself as a HAL.  Actual start time could be longer
-        // because the process might not have joined the threadpool yet, so it might not be ready to
-        // process transactions.
-        LOG(INFO) << "Registered " << descriptor << "/" << instanceName << " (start delay of "
-                  << halStartDelay << "ms)";
-    }
-
+    LOG(INFO) << "Registered " << descriptor << "/" << instanceName;
     tryShortenProcessName(descriptor);
 }
 
@@ -479,18 +416,27 @@ struct PassthroughServiceManager : IServiceManager1_1 {
             *(void **)(&generator) = dlsym(handle, sym.c_str());
             if(!generator) {
                 const char* error = dlerror();
-                LOG(ERROR) << "Passthrough lookup opened " << lib
-                           << " but could not find symbol " << sym << ": "
-                           << (error == nullptr ? "unknown error" : error);
-                dlclose(handle);
-                return true;
+                LOG(ERROR) << "Passthrough lookup opened " << lib << " but could not find symbol "
+                           << sym << ": " << (error == nullptr ? "unknown error" : error)
+                           << ". Keeping library open.";
+
+                // dlclose too problematic in multi-threaded environment
+                // dlclose(handle);
+
+                return true;  // continue
             }
 
             ret = (*generator)(name.c_str());
 
             if (ret == nullptr) {
-                dlclose(handle);
-                return true; // this module doesn't provide this instance name
+                LOG(ERROR) << "Could not find instance '" << name.c_str() << "' in library " << lib
+                           << ". Keeping library open.";
+
+                // dlclose too problematic in multi-threaded environment
+                // dlclose(handle);
+
+                // this module doesn't provide this particular instance
+                return true;  // continue
             }
 
             // Actual fqname might be a subclass.
@@ -819,7 +765,7 @@ sp<::android::hidl::base::V1_0::IBase> getRawServiceInternal(const std::string& 
     const bool vintfHwbinder = (transport == Transport::HWBINDER);
     const bool vintfPassthru = (transport == Transport::PASSTHROUGH);
     const bool trebleTestingOverride = isTrebleTestingOverride();
-    const bool allowLegacy = !kEnforceVintfManifest || (trebleTestingOverride && kDebuggable);
+    const bool allowLegacy = !kEnforceVintfManifest || (trebleTestingOverride && isDebuggable());
     const bool vintfLegacy = (transport == Transport::EMPTY) && allowLegacy;
 
     if (!kEnforceVintfManifest) {
@@ -901,7 +847,13 @@ status_t registerAsServiceInternal(const sp<IBase>& service, const std::string& 
 
     if (kEnforceVintfManifest && !isTrebleTestingOverride()) {
         using Transport = IServiceManager1_0::Transport;
-        Transport transport = sm->getTransport(descriptor, name);
+        Return<Transport> transport = sm->getTransport(descriptor, name);
+
+        if (!transport.isOk()) {
+            LOG(ERROR) << "Could not get transport for " << descriptor << "/" << name << ": "
+                       << transport.description();
+            return UNKNOWN_ERROR;
+        }
 
         if (transport != Transport::HWBINDER) {
             LOG(ERROR) << "Service " << descriptor << "/" << name
